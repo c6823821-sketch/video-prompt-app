@@ -1,0 +1,14 @@
+{
+  "appId": "com.jingyue.videoprompt",
+  "appName": "视频反推提示词",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "Browser": {
+      "showTitleBar": false,
+      "toolbarColor": "#1a1a2e"
+    }
+  }
+}

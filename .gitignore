@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+scripts/e2e-result.txt
+scripts/e2e-screenshot.png
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
