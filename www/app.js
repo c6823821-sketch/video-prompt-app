@@ -2,7 +2,7 @@
 'use strict';
 
 const DEFAULT_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const REPO = 'c6823821-sketch/video-prompt-app'; // GitHub 仓库（自动更新用）
 
 const $ = id => document.getElementById(id);
@@ -98,6 +98,29 @@ function seekTo(video, t) {
   });
 }
 
+/* ---------- 统一网络请求（原生走 CapacitorHttp，绕过 WebView fetch 限制） ---------- */
+function isNative() { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+async function postJSON(url, bodyObj, headers) {
+  if (isNative()) {
+    const Http = (window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp);
+    if (Http && Http.post) {
+      const r = await Http.post({ url, headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}), data: JSON.stringify(bodyObj),
+        // 大 payload（多张 base64 图 + 音频）给足超时
+        readTimeout: 120000, connectTimeout: 30000 });
+      const status = r.status != null ? r.status : 200;
+      let data = r.data;
+      if (typeof data === 'string') { try { data = JSON.parse(data); } catch (e) {} }
+      return { ok: status >= 200 && status < 300, status, data };
+    }
+  }
+  // 网页端 / 原生插件不可用时降级 fetch
+  const resp = await fetch(url, { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}),
+    body: JSON.stringify(bodyObj) });
+  const text = await resp.text();
+  let data; try { data = JSON.parse(text); } catch (e) { data = text; }
+  return { ok: resp.ok, status: resp.status, data };
+}
+
 /* ---------- 音频转文字 ---------- */
 function encodeWav(audioBuffer, maxSeconds) {
   // 手动线性插值降采样到 16k 单声道 PCM16（不用 OfflineAudioContext，部分手机/浏览器会输出静音）
@@ -138,14 +161,12 @@ async function extractTranscript(file) {
     if (!audio || audio.duration < 0.5) return '';
     // ASR 上限约 3 分钟，encodeWav 内部只取前 170 秒
     const dataUri = encodeWav(audio, 170);
-    const resp = await fetch(state.base.replace(/\/$/, '') + '/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.key },
-      body: JSON.stringify({ model: 'qwen3-asr-flash', stream: false,
-        messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: dataUri } }] }] })
-    });
+    const resp = await postJSON(state.base.replace(/\/$/, '') + '/chat/completions',
+      { model: 'qwen3-asr-flash', stream: false,
+        messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: dataUri } }] }] },
+      { 'Authorization': 'Bearer ' + state.key });
     if (!resp.ok) return '';
-    const j = await resp.json();
+    const j = resp.data;
     return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
   } catch (e) { return ''; }
   finally { try { ac.close(); } catch (e) {} }
@@ -208,18 +229,15 @@ async function callVLM(frames) {
   });
   content.push({ type: 'text', text: buildPrompt(frames.length, state.duration, state.transcript, state.ratio, state.ratioLabel) });
 
-  const resp = await fetch(state.base.replace(/\/$/, '') + '/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.key },
-    body: JSON.stringify({ model: state.model, messages: [{ role: 'user', content }], max_tokens: 6000 })
-  });
-  const text = await resp.text();
+  const resp = await postJSON(state.base.replace(/\/$/, '') + '/chat/completions',
+    { model: state.model, messages: [{ role: 'user', content }], max_tokens: 6000 },
+    { 'Authorization': 'Bearer ' + state.key });
   if (!resp.ok) {
-    let msg = text.slice(0, 300);
-    try { const j = JSON.parse(text); msg = (j.error && j.error.message) || msg; } catch(e) {}
+    let msg = JSON.stringify(resp.data).slice(0, 300);
+    try { msg = (resp.data.error && resp.data.error.message) || msg; } catch (e) {}
     throw new Error('接口报错 ' + resp.status + '：' + msg);
   }
-  const j = JSON.parse(text);
+  const j = resp.data;
   const out = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
   if (!out) throw new Error('模型没返回内容');
   return out;
@@ -341,7 +359,7 @@ function showError(e) {
   if (m.includes('解码') || m.includes('时长')) hint = '\n\n建议：换成 mp4（H.264）格式，微信/抖音转存过的视频常被加密，先导出成mp4再试。';
   else if (m.includes('接口报错 401')) hint = '\n\n建议：API Key 填错了，去设置里重新粘贴一遍。';
   else if (m.includes('接口报错 400')) hint = '\n\n建议：视频帧数太多或文件太大，去设置把抽帧数调到 8 试试。';
-  else if (m.includes('超时') || m.includes('fetch')) hint = '\n\n建议：检查网络，或换 4G/WiFi 重试。';
+  else if (m.includes('超时') || m.includes('fetch')) hint = '\n\n建议：①检查手机能不能上网（打开浏览器试）；②换 4G/WiFi；③如果一直失败，可能是这个版本的问题，去 GitHub Releases 下最新版装。';
   $('error-msg').textContent = '出错：' + m + hint;
   box.classList.remove('hidden');
   box.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -356,7 +374,12 @@ async function checkUpdate(silent) {
     const j = await r.json();
     const latest = (j.tag_name || '').replace(/^v/, '');
     if (compareVer(latest, VERSION) > 0) {
-      $('update-info').textContent = '新版本 ' + latest + '\n' + (j.body || '').slice(0, 200);
+      // 判断是否跨签名：1.2.0 之前是随机签名，从 1.2.0 起固定签名
+      const needUninstall = compareVer(VERSION, '1.2.0') < 0;
+      const tip = needUninstall
+        ? '\n\n⚠️ 你现在是旧版（' + VERSION + '），签名和新版不同。装新版前请【先卸载当前 APP】，否则会提示签名冲突。只卸这一次，以后都能直接覆盖更新。'
+        : '\n\n可直接覆盖安装，不用卸载。';
+      $('update-info').textContent = '新版本 ' + latest + tip;
       state.apkUrl = (j.assets || []).find(a => a.name.endsWith('.apk'))?.browser_download_url || j.html_url;
       $('update-modal').classList.remove('hidden');
     } else if (!silent) toast('已是最新版本');

@@ -6,6 +6,9 @@
     "androidScheme": "https"
   },
   "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    },
     "Browser": {
       "showTitleBar": false,
       "toolbarColor": "#1a1a2e"
