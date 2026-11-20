@@ -3,7 +3,7 @@
 
 const DEFAULT_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const VERSION = '1.0.0';
-const REPO = 'jingyue-ai/video-prompt-app'; // GitHub 仓库，登录后按实际改
+const REPO = 'c6823821-sketch/video-prompt-app'; // GitHub 仓库（自动更新用）
 
 const $ = id => document.getElementById(id);
 const state = {
