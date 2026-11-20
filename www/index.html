@@ -36,6 +36,13 @@
       <input type="file" id="file-input" accept="video/*" hidden>
     </div>
 
+    <!-- 错误（常驻，可看清可复制） -->
+    <div id="error-card" class="card err hidden">
+      <div class="err-head"><strong>❌ 这次没跑通</strong><button class="link-btn" onclick="closeError()">关闭</button></div>
+      <pre id="error-msg"></pre>
+      <p class="err-tip">把上面的文字截图发我，我照着修。</p>
+    </div>
+
     <!-- 进度 -->
     <div id="progress-card" class="card hidden">
       <div class="progress-head">
@@ -56,6 +63,10 @@
         </div>
       </div>
       <div id="video-info" class="video-info"></div>
+      <div id="transcript-box" class="card transcript hidden">
+        <div class="section-head"><strong>🎙 识别到的旁白</strong><button class="btn small ghost" onclick="copyText(state.transcript)">复制</button></div>
+        <p id="transcript-text"></p>
+      </div>
       <div id="prompt-content"></div>
     </div>
 
@@ -82,17 +93,17 @@
       </select>
       <label>抽帧数量</label>
       <select id="frame-count">
-        <option value="4">4 帧（快，省流量）</option>
-        <option value="6" selected>6 帧（推荐）</option>
-        <option value="8">8 帧（细，慢一点）</option>
+        <option value="8">8 帧（快，省流量）</option>
+        <option value="16" selected>16 帧（推荐）</option>
+        <option value="24">24 帧（最细，慢一点）</option>
       </select>
-      <p class="field-hint">帧数越多，提示词越贴原片，但调用费用略高。</p>
+      <p class="field-hint">同时识别画面+旁白声音+字幕文字。帧数越多越贴原片，费用略高。</p>
       <label>接口地址</label>
       <input type="text" id="base-url" value="https://dashscope.aliyuncs.com/compatible-mode/v1">
       <button class="btn block" onclick="saveSettings()">保存</button>
       <div id="settings-msg" class="settings-msg"></div>
       <div class="about">
-        <p>版本 <span id="app-version">1.0.0</span> · <button class="link-btn" onclick="checkUpdate()">检查更新</button></p>
+        <p>版本 <span id="app-version">1.1.0</span> · <button class="link-btn" onclick="checkUpdate()">检查更新</button></p>
         <p>Key 由你自己的账号承担费用，本 APP 不收集任何数据。</p>
       </div>
     </div>

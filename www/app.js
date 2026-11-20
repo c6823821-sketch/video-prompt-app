@@ -2,13 +2,13 @@
 'use strict';
 
 const DEFAULT_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const REPO = 'c6823821-sketch/video-prompt-app'; // GitHub 仓库（自动更新用）
 
 const $ = id => document.getElementById(id);
 const state = {
-  key: '', model: 'qwen3-vl-plus', frames: 6, base: DEFAULT_BASE,
-  history: [], videoName: '', duration: 0, framesData: [], result: null
+  key: '', model: 'qwen3-vl-plus', frames: 16, base: DEFAULT_BASE,
+  history: [], videoName: '', duration: 0, framesData: [], result: null, transcript: ''
 };
 
 /* ---------- 存储 ---------- */
@@ -17,7 +17,7 @@ function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch
 function loadSettings() {
   const s = lsGet('vpa_settings', {});
   state.key = s.key || ''; state.model = s.model || 'qwen3-vl-plus';
-  state.frames = s.frames || 6; state.base = s.base || DEFAULT_BASE;
+  state.frames = s.frames || 16; state.base = s.base || DEFAULT_BASE;
   state.history = lsGet('vpa_history', []);
 }
 function openSettings() {
@@ -85,35 +85,91 @@ function seekTo(video, t) {
   });
 }
 
+/* ---------- 音频转文字 ---------- */
+function encodeWav(audioBuffer, maxSeconds) {
+  // 手动线性插值降采样到 16k 单声道 PCM16（不用 OfflineAudioContext，部分手机/浏览器会输出静音）
+  const targetRate = 16000;
+  const ch = audioBuffer.getChannelData(0);
+  const srcRate = audioBuffer.sampleRate;
+  const total = Math.min(ch.length, Math.floor((maxSeconds || 170) * srcRate));
+  const outLen = Math.floor(total * targetRate / srcRate);
+  const buf = new ArrayBuffer(44 + outLen * 2);
+  const v = new DataView(buf);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); v.setUint32(4, 36 + outLen * 2, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, targetRate, true); v.setUint32(28, targetRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  wr(36, 'data'); v.setUint32(40, outLen * 2, true);
+  const ratio = srcRate / targetRate;
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * ratio, i0 = Math.floor(pos), frac = pos - i0;
+    let s = ch[i0] * (1 - frac) + (ch[i0 + 1] || 0) * frac;
+    s = Math.max(-1, Math.min(1, s));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let bin = ''; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  return 'data:audio/wav;base64,' + btoa(bin);
+}
+async function extractTranscript(file) {
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return '';
+  const ac = new Ctor();
+  try {
+    const arr = await file.arrayBuffer();
+    let audio;
+    try { audio = await ac.decodeAudioData(arr); }
+    catch (e) { return ''; } // 音轨解码失败就跳过，不影响画面分析
+    if (!audio || audio.duration < 0.5) return '';
+    // ASR 上限约 3 分钟，encodeWav 内部只取前 170 秒
+    const dataUri = encodeWav(audio, 170);
+    const resp = await fetch(state.base.replace(/\/$/, '') + '/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.key },
+      body: JSON.stringify({ model: 'qwen3-asr-flash', stream: false,
+        messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: dataUri } }] }] })
+    });
+    if (!resp.ok) return '';
+    const j = await resp.json();
+    return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+  } catch (e) { return ''; }
+  finally { try { ac.close(); } catch (e) {} }
+}
+
 /* ---------- 调模型 ---------- */
-function buildPrompt(frameCount, duration) {
-  return `这是一个视频的 ${frameCount} 张关键帧（按时间顺序，覆盖约 ${duration.toFixed(1)} 秒）。
+function buildPrompt(frameCount, duration, transcript) {
+  const audioPart = transcript && transcript.trim()
+    ? `\n\n【视频旁白/口播原文（语音识别得到）】\n${transcript.trim()}\n\n请把这段旁白也应该出现在复刻视频的字幕/口播中，并在提示词里标明字幕的文字内容和出现时机。`
+    : '\n\n（本条视频没有识别到清晰的人声旁白，只按画面分析。）';
+  return `这是一个视频的 ${frameCount} 张关键帧（按时间顺序，覆盖约 ${duration.toFixed(1)} 秒）。${audioPart}
 请逆向分析这个视频，输出可直接用于 AI 视频生成模型（如即梦、可灵、Sora、Veo）的复刻提示词。
 
 严格按以下格式输出（Markdown）：
 
 ## 整体判断
-一句话：画面是怎么做的（实拍/AI生成/图文动效/混合）、主体是谁或什么、整体风格。
+一句话：画面是怎么做的（实拍/AI生成/图文动效/混合）、主体是谁或什么、整体风格；有无口播/字幕。
 
-## 逐帧提示词
-### 帧 1（约 0.0 秒）
-- 画面：主体、环境、构图、光线、色彩
-- 动作：这一刻发生什么、怎么动
+## 逐镜提示词
+按画面变化分镜（不是每帧一段，相邻画面相同就合并成一镜）。每镜写：
+- 画面：主体、环境、构图、光线、色彩、画面里出现的文字/字幕
+- 动作：这一镜发生什么、怎么动
 - 运镜：机位、景别、推拉摇移
-
-（每帧都按上面格式写，帧数与实际一致）
+- 字幕/口播：这一镜对应的旁白文字（如有）
 
 ## 整合提示词（中文）
-把整条视频浓缩成一段可直接复制的生成提示词，包含：主体外观、场景、光线、色调、动作顺序、运镜、节奏、风格。
+把整条视频浓缩成一段可直接复制的生成提示词，包含：主体外观、场景、光线、色调、动作顺序、运镜、节奏、风格、字幕文字、口播内容。
 
 ## Integrated Prompt (English)
-The single ready-to-use English prompt for video generation models.
+The single ready-to-use English prompt for video generation models, including on-screen text and narration.
 
 要求：
-1. 只描述你从帧里真正看到的内容，看不清的写"不确定"，不要编造。
+1. 只描述你从帧里和旁白里真正看到/听到的内容，看不清的写"不确定"，不要编造。
 2. 动作和运镜写具体（比如"缓慢向右推镜"而不是"有运镜"）。
-3. 中文提示词 150-300 字，英文 80-150 词。
-4. 不要输出分析过程、免责声明或额外说明。`;
+3. 画面里出现的文字要原样写出来（这是字幕/封面文案，复刻时必须还原）。
+4. 中文提示词 200-400 字，英文 100-200 词。
+5. 不要输出分析过程、免责声明或额外说明。`;
 }
 async function callVLM(frames) {
   const content = [];
@@ -121,12 +177,12 @@ async function callVLM(frames) {
     content.push({ type: 'text', text: `【关键帧 ${i + 1} · 约 ${f.t.toFixed(2)} 秒】` });
     content.push({ type: 'image_url', image_url: { url: f.data } });
   });
-  content.push({ type: 'text', text: buildPrompt(frames.length, state.duration) });
+  content.push({ type: 'text', text: buildPrompt(frames.length, state.duration, state.transcript) });
 
   const resp = await fetch(state.base.replace(/\/$/, '') + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.key },
-    body: JSON.stringify({ model: state.model, messages: [{ role: 'user', content }], max_tokens: 2000 })
+    body: JSON.stringify({ model: state.model, messages: [{ role: 'user', content }], max_tokens: 4000 })
   });
   const text = await resp.text();
   if (!resp.ok) {
@@ -157,23 +213,30 @@ async function handleFile(file) {
     onProgress(0, '读取视频…', file.name + ' · ' + (file.size / 1048576).toFixed(1) + ' MB');
     const frames = await extractFrames(file, state.frames);
     state.framesData = frames;
-    onProgress(45, '发送给视觉模型…', frames.length + ' 帧已提取，正在分析');
+    onProgress(40, '识别旁白声音…', '正在把音轨转成文字');
+    state.transcript = await extractTranscript(file);
+    onProgress(50, '发送给视觉模型…', frames.length + ' 帧' + (state.transcript ? ' + 旁白文字' : '') + '，正在分析');
     const prompt = await callVLM(frames);
     onProgress(95, '整理结果…');
     state.result = prompt;
     renderResult(prompt, file);
     saveHistory({ name: file.name, time: Date.now(), duration: state.duration,
-      frames: frames.length, prompt, size: file.size });
+      frames: frames.length, prompt, size: file.size, transcript: state.transcript });
     onProgress(100, '完成 ✓');
     setTimeout(() => $('progress-card').classList.add('hidden'), 900);
   } catch (e) {
     $('progress-card').classList.add('hidden');
-    toast('出错：' + e.message);
+    showError(e);
     console.error(e);
   }
 }
 function renderResult(prompt, file) {
-  $('video-info').textContent = '视频：' + file.name + ' · ' + state.duration.toFixed(1) + ' 秒 · 分析 ' + state.framesData.length + ' 帧';
+  $('video-info').textContent = '视频：' + file.name + ' · ' + state.duration.toFixed(1) + ' 秒 · 分析 ' + state.framesData.length + ' 帧' + (state.transcript ? ' · 含旁白' : '');
+  const tb = $('transcript-box');
+  if (state.transcript && state.transcript.trim()) {
+    $('transcript-text').textContent = state.transcript;
+    tb.classList.remove('hidden');
+  } else tb.classList.add('hidden');
   const host = $('prompt-content'); host.innerHTML = '';
   // 按 ## 分块展示
   const chunks = prompt.split(/(?=^## )/m).filter(s => s.trim());
@@ -236,6 +299,20 @@ function toast(msg) {
   const t = $('toast'); t.textContent = msg; t.classList.remove('hidden');
   clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.add('hidden'), 2500);
 }
+function showError(e) {
+  const box = $('error-card');
+  if (!box) { toast('出错：' + e.message); return; }
+  let hint = '';
+  const m = String(e.message || e);
+  if (m.includes('解码') || m.includes('时长')) hint = '\n\n建议：换成 mp4（H.264）格式，微信/抖音转存过的视频常被加密，先导出成mp4再试。';
+  else if (m.includes('接口报错 401')) hint = '\n\n建议：API Key 填错了，去设置里重新粘贴一遍。';
+  else if (m.includes('接口报错 400')) hint = '\n\n建议：视频帧数太多或文件太大，去设置把抽帧数调到 8 试试。';
+  else if (m.includes('超时') || m.includes('fetch')) hint = '\n\n建议：检查网络，或换 4G/WiFi 重试。';
+  $('error-msg').textContent = '出错：' + m + hint;
+  box.classList.remove('hidden');
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+function closeError() { $('error-card').classList.add('hidden'); }
 
 /* ---------- 更新 ---------- */
 async function checkUpdate(silent) {

@@ -20,7 +20,7 @@ const path = require('path');
   await page.click('#btn-settings');
   await page.fill('#api-key', key);
   await page.fill('#base-url', 'https://dashscope.aliyuncs.com/compatible-mode/v1');
-  await page.selectOption('#frame-count', '4');
+  await page.selectOption('#frame-count', '16');
   await page.click('.modal-body .btn.block');
   await page.waitForTimeout(900);
 

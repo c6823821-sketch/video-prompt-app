@@ -76,4 +76,12 @@ h2 { font-size: 17px; font-weight: 650; }
 .toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
   background: #33334a; color: #fff; padding: 10px 20px; border-radius: 20px;
   font-size: 13px; z-index: 200; box-shadow: 0 4px 20px rgba(0,0,0,.4); }
+.card.err { border-color: #a33; background: #2a1c22; }
+.err-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; color: #ff8a8a; }
+.card.err pre { white-space: pre-wrap; word-break: break-word; font-family: inherit;
+  font-size: 12px; line-height: 1.65; color: #ffd7d7; margin: 0; }
+.err-tip { font-size: 11px; color: #d99; margin-top: 10px; }
+.card.transcript { margin-top: 14px; border-color: var(--accent2); }
+.card.transcript .section-head { margin: 0 0 8px; }
+.card.transcript p { font-size: 13px; line-height: 1.7; color: #d8d8e8; margin: 0; }
 .hidden { display: none !important; }
