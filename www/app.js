@@ -2,14 +2,24 @@
 'use strict';
 
 const DEFAULT_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const REPO = 'c6823821-sketch/video-prompt-app'; // GitHub 仓库（自动更新用）
 
 const $ = id => document.getElementById(id);
 const state = {
   key: '', model: 'qwen3-vl-plus', frames: 16, base: DEFAULT_BASE,
-  history: [], videoName: '', duration: 0, framesData: [], result: null, transcript: ''
+  history: [], videoName: '', duration: 0, framesData: [], result: null, transcript: '',
+  ratio: '9:16', ratioLabel: '', width: 0, height: 0
 };
+
+function calcRatio(w, h) {
+  if (!w || !h) return { key: '16:9', label: '' };
+  const r = w / h;
+  const presets = [['9:16', 9/16], ['16:9', 16/9], ['1:1', 1], ['3:4', 3/4], ['4:3', 4/3], ['9:19.5', 9/19.5], ['2.39:1', 2.39]];
+  let best = presets[0], diff = Infinity;
+  for (const p of presets) { const d = Math.abs(r - p[1]); if (d < diff) { diff = d; best = p; } }
+  return { key: best[0], label: w + '×' + h + '（≈' + best[0] + '）' };
+}
 
 /* ---------- 存储 ---------- */
 function lsGet(k, def) { try { const v = localStorage.getItem(k); return v === null ? def : JSON.parse(v); } catch(e) { return def; } }
@@ -55,6 +65,9 @@ function extractFrames(file, count) {
         const duration = video.duration;
         if (!isFinite(duration) || duration <= 0) throw new Error('读不到视频时长');
         state.duration = duration;
+        const ratio = calcRatio(video.videoWidth, video.videoHeight);
+        state.ratio = ratio.key; state.ratioLabel = ratio.label;
+        state.width = video.videoWidth; state.height = video.videoHeight;
         const frames = [];
         const safeCount = Math.min(count, Math.max(2, Math.floor(duration / 0.3)));
         for (let i = 0; i < safeCount; i++) {
@@ -139,17 +152,39 @@ async function extractTranscript(file) {
 }
 
 /* ---------- 调模型 ---------- */
-function buildPrompt(frameCount, duration, transcript) {
+function buildPrompt(frameCount, duration, transcript, ratio, ratioLabel) {
   const audioPart = transcript && transcript.trim()
     ? `\n\n【视频旁白/口播原文（语音识别得到）】\n${transcript.trim()}\n\n请把这段旁白也应该出现在复刻视频的字幕/口播中，并在提示词里标明字幕的文字内容和出现时机。`
     : '\n\n（本条视频没有识别到清晰的人声旁白，只按画面分析。）';
-  return `这是一个视频的 ${frameCount} 张关键帧（按时间顺序，覆盖约 ${duration.toFixed(1)} 秒）。${audioPart}
-请逆向分析这个视频，输出可直接用于 AI 视频生成模型（如即梦、可灵、Sora、Veo）的复刻提示词。
+  return `这是一个视频的 ${frameCount} 张关键帧（按时间顺序，覆盖约 ${duration.toFixed(1)} 秒）。视频原始尺寸 ${ratioLabel || '未知'}，画幅比例 ${ratio}。${audioPart}
+请逆向分析这个视频，输出可直接用于 AI 创作工具复刻的提示词。复刻流程是"先用 AI 画图工具生成首帧底图，再把底图导入 AI 视频工具生成视频"，所以必须分两块给：底图提示词 + 视频提示词。
 
 严格按以下格式输出（Markdown）：
 
 ## 整体判断
-一句话：画面是怎么做的（实拍/AI生成/图文动效/混合）、主体是谁或什么、整体风格；有无口播/字幕。
+一句话：画面是怎么做的（实拍/AI生成/图文动效/混合）、主体是谁或什么、整体风格、画幅比例；有无口播/字幕。
+
+## 第一步·底图提示词（中文）
+用于即梦/Midjourney/SD 等画图工具生成首帧底图。要求：
+- 主体外观、服饰、表情写得细，能直接照着画
+- 场景、构图、机位、景别、光线、色调、画质写全
+- 明确写"画幅比例 ${ratio}"
+- 如果首帧有文字/字幕，写清楚文字内容和位置（画图工具做文字容易糊，要提醒）
+- 写成一段可直接复制的连贯提示词，150-250 字
+
+## Step 1 · Base Image Prompt (English)
+The ready-to-use English image-generation prompt for the first frame. Include aspect ratio ${ratio}, subject, scene, lighting, camera, style, quality. 80-150 words.
+
+## 第二步·视频提示词（中文）
+用于可灵/即梦/Sora/Veo 等视频工具，把上一步的底图变成视频。写清楚：
+- 主体怎么动、动作顺序
+- 运镜（推拉摇移、固定机等）
+- 字幕/口播文字及出现时机
+- 节奏、时长参考 ${duration.toFixed(1)} 秒
+- 写成一段可直接复制的提示词，150-300 字
+
+## Step 2 · Video Prompt (English)
+The ready-to-use English video-generation prompt: motion, camera movement, on-screen text, narration, pacing. 80-150 words.
 
 ## 逐镜提示词
 按画面变化分镜（不是每帧一段，相邻画面相同就合并成一镜）。每镜写：
@@ -158,17 +193,11 @@ function buildPrompt(frameCount, duration, transcript) {
 - 运镜：机位、景别、推拉摇移
 - 字幕/口播：这一镜对应的旁白文字（如有）
 
-## 整合提示词（中文）
-把整条视频浓缩成一段可直接复制的生成提示词，包含：主体外观、场景、光线、色调、动作顺序、运镜、节奏、风格、字幕文字、口播内容。
-
-## Integrated Prompt (English)
-The single ready-to-use English prompt for video generation models, including on-screen text and narration.
-
 要求：
 1. 只描述你从帧里和旁白里真正看到/听到的内容，看不清的写"不确定"，不要编造。
 2. 动作和运镜写具体（比如"缓慢向右推镜"而不是"有运镜"）。
 3. 画面里出现的文字要原样写出来（这是字幕/封面文案，复刻时必须还原）。
-4. 中文提示词 200-400 字，英文 100-200 词。
+4. 底图提示词和视频提示词分开写，不要混成一段。
 5. 不要输出分析过程、免责声明或额外说明。`;
 }
 async function callVLM(frames) {
@@ -177,12 +206,12 @@ async function callVLM(frames) {
     content.push({ type: 'text', text: `【关键帧 ${i + 1} · 约 ${f.t.toFixed(2)} 秒】` });
     content.push({ type: 'image_url', image_url: { url: f.data } });
   });
-  content.push({ type: 'text', text: buildPrompt(frames.length, state.duration, state.transcript) });
+  content.push({ type: 'text', text: buildPrompt(frames.length, state.duration, state.transcript, state.ratio, state.ratioLabel) });
 
   const resp = await fetch(state.base.replace(/\/$/, '') + '/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + state.key },
-    body: JSON.stringify({ model: state.model, messages: [{ role: 'user', content }], max_tokens: 4000 })
+    body: JSON.stringify({ model: state.model, messages: [{ role: 'user', content }], max_tokens: 6000 })
   });
   const text = await resp.text();
   if (!resp.ok) {
@@ -221,7 +250,8 @@ async function handleFile(file) {
     state.result = prompt;
     renderResult(prompt, file);
     saveHistory({ name: file.name, time: Date.now(), duration: state.duration,
-      frames: frames.length, prompt, size: file.size, transcript: state.transcript });
+      frames: frames.length, prompt, size: file.size, transcript: state.transcript,
+      ratio: state.ratio, ratioLabel: state.ratioLabel, width: state.width, height: state.height });
     onProgress(100, '完成 ✓');
     setTimeout(() => $('progress-card').classList.add('hidden'), 900);
   } catch (e) {
@@ -231,7 +261,7 @@ async function handleFile(file) {
   }
 }
 function renderResult(prompt, file) {
-  $('video-info').textContent = '视频：' + file.name + ' · ' + state.duration.toFixed(1) + ' 秒 · 分析 ' + state.framesData.length + ' 帧' + (state.transcript ? ' · 含旁白' : '');
+  $('video-info').textContent = '视频：' + file.name + ' · ' + state.duration.toFixed(1) + ' 秒 · ' + (state.ratioLabel || state.ratio) + ' · 分析 ' + state.framesData.length + ' 帧' + (state.transcript ? ' · 含旁白' : '');
   const tb = $('transcript-box');
   if (state.transcript && state.transcript.trim()) {
     $('transcript-text').textContent = state.transcript;
@@ -274,10 +304,14 @@ function renderHistory() {
     const d = document.createElement('div'); d.className = 'hist-item';
     const n = document.createElement('div'); n.className = 'hist-name'; n.textContent = h.name;
     const m = document.createElement('div'); m.className = 'hist-meta';
-    m.textContent = new Date(h.time).toLocaleString('zh-CN') + ' · ' + h.duration.toFixed(1) + 's · ' + h.frames + '帧';
+    m.textContent = new Date(h.time).toLocaleString('zh-CN') + ' · ' + h.duration.toFixed(1) + 's · ' + (h.ratioLabel || h.ratio || '') + ' · ' + h.frames + '帧';
     d.appendChild(n); d.appendChild(m);
     d.onclick = () => {
       state.result = h.prompt;
+      state.transcript = h.transcript || '';
+      state.ratio = h.ratio || '9:16'; state.ratioLabel = h.ratioLabel || '';
+      state.duration = h.duration || 0;
+      state.framesData = new Array(h.frames || 0);
       renderResult(h.prompt, { name: h.name });
       window.scrollTo({ top: 0, behavior: 'smooth' });
     };
